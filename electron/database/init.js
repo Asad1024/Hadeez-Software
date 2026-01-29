@@ -102,6 +102,7 @@ module.exports = function initDb(db) {
     CREATE TABLE IF NOT EXISTS orders (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       order_number TEXT UNIQUE NOT NULL,
+      daily_number INTEGER,
       order_type TEXT DEFAULT 'dine_in' CHECK(order_type IN ('dine_in', 'takeaway', 'delivery')),
       table_number TEXT,
       customer_id INTEGER REFERENCES credit_customers(id),
@@ -117,6 +118,12 @@ module.exports = function initDb(db) {
       created_at TEXT DEFAULT (datetime('now')),
       updated_at TEXT DEFAULT (datetime('now')),
       notes TEXT
+    );
+
+    -- Closed days (day closed, no new orders)
+    CREATE TABLE IF NOT EXISTS closed_days (
+      closed_date TEXT PRIMARY KEY,
+      closed_at TEXT DEFAULT (datetime('now'))
     );
 
     -- Order Items
@@ -155,7 +162,31 @@ module.exports = function initDb(db) {
       created_at TEXT DEFAULT (datetime('now'))
     );
 
+    -- Expenses (daily expense entries)
+    CREATE TABLE IF NOT EXISTS expenses (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      expense_date TEXT NOT NULL,
+      amount REAL NOT NULL DEFAULT 0,
+      category TEXT,
+      description TEXT,
+      notes TEXT,
+      created_by INTEGER REFERENCES staff(id),
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+
+    -- Cash in hand (one record per date, e.g. closing cash)
+    CREATE TABLE IF NOT EXISTS daily_cash (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      cash_date TEXT NOT NULL UNIQUE,
+      amount REAL NOT NULL DEFAULT 0,
+      notes TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+
     CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders(created_at);
+    CREATE INDEX IF NOT EXISTS idx_expenses_date ON expenses(expense_date);
+    CREATE INDEX IF NOT EXISTS idx_daily_cash_date ON daily_cash(cash_date);
     CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id);
     CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items(order_id);
     CREATE INDEX IF NOT EXISTS idx_stock_movements_item ON stock_movements(stock_item_id);

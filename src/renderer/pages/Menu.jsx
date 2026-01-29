@@ -16,6 +16,7 @@ export default function Menu() {
   const [form, setForm] = useState({ name: '', sort_order: 0 });
   const [itemForm, setItemForm] = useState({
     name: '', description: '', category_id: '', sale_price: '', cost_price: '', is_available: 1,
+    variants: [], // { name, sale_price, cost_price } for sizes (cold drink: 0.5L, 1L, 1.5L; pizza: Small, Medium, Large)
   });
 
   const loadCategories = async () => {
@@ -28,7 +29,15 @@ export default function Menu() {
     const res = await dbAll(
       'SELECT m.*, c.name as category_name FROM menu_items m LEFT JOIN menu_categories c ON c.id = m.category_id ORDER BY m.sort_order, m.name'
     );
-    setItems(res?.data ?? []);
+    const itemList = res?.data ?? [];
+    const variantsRes = await dbAll('SELECT * FROM item_variants ORDER BY menu_item_id, sort_order, name');
+    const variantsList = variantsRes?.data ?? [];
+    const variantsByItem = {};
+    variantsList.forEach((v) => {
+      if (!variantsByItem[v.menu_item_id]) variantsByItem[v.menu_item_id] = [];
+      variantsByItem[v.menu_item_id].push(v);
+    });
+    setItems(itemList.map((m) => ({ ...m, variants: variantsByItem[m.id] ?? [] })));
   };
 
   useEffect(() => {
@@ -79,6 +88,11 @@ export default function Menu() {
 
   const openItemModal = (item = null) => {
     setEditId(item?.id ?? null);
+    const variants = (item?.variants ?? []).map((v) => ({
+      name: v.name ?? '',
+      sale_price: v.sale_price ?? '',
+      cost_price: v.cost_price ?? '',
+    }));
     setItemForm({
       name: item?.name ?? '',
       description: item?.description ?? '',
@@ -86,23 +100,55 @@ export default function Menu() {
       sale_price: item?.sale_price ?? '',
       cost_price: item?.cost_price ?? '',
       is_available: item?.is_available ?? 1,
+      variants: variants.length ? variants : [],
     });
     setModal('item');
   };
 
+  const addVariantRow = () => {
+    setItemForm((f) => ({ ...f, variants: [...(f.variants || []), { name: '', sale_price: '', cost_price: '' }] }));
+  };
+
+  const updateVariant = (index, field, value) => {
+    setItemForm((f) => {
+      const v = [...(f.variants || [])];
+      v[index] = { ...v[index], [field]: value };
+      return { ...f, variants: v };
+    });
+  };
+
+  const removeVariant = (index) => {
+    setItemForm((f) => ({ ...f, variants: (f.variants || []).filter((_, i) => i !== index) }));
+  };
+
   const saveItem = async () => {
-    if (!itemForm.name.trim() || !itemForm.category_id || itemForm.sale_price === '') return;
+    if (!itemForm.name.trim() || !itemForm.category_id) return;
+    const hasVariants = (itemForm.variants || []).some((v) => (v.name || '').trim());
+    if (!hasVariants && itemForm.sale_price === '') return;
     const sale = Number(itemForm.sale_price) || 0;
     const cost = Number(itemForm.cost_price) || 0;
+    let menuItemId = editId;
     if (editId) {
       await dbRun(
         'UPDATE menu_items SET name = ?, description = ?, category_id = ?, sale_price = ?, cost_price = ?, is_available = ?, updated_at = datetime("now") WHERE id = ?',
         [itemForm.name.trim(), itemForm.description?.trim() ?? '', itemForm.category_id, sale, cost, itemForm.is_available ? 1 : 0, editId]
       );
     } else {
-      await dbRun(
+      const ins = await dbRun(
         'INSERT INTO menu_items (name, description, category_id, sale_price, cost_price, is_available) VALUES (?, ?, ?, ?, ?, ?)',
         [itemForm.name.trim(), itemForm.description?.trim() ?? '', itemForm.category_id, sale, cost, itemForm.is_available ? 1 : 0]
+      );
+      if (ins?.error) { alert('Failed to save item: ' + ins.error); return; }
+      const idRes = await dbGet('SELECT id FROM menu_items ORDER BY id DESC LIMIT 1');
+      menuItemId = idRes?.data?.id;
+    }
+    await dbRun('DELETE FROM item_variants WHERE menu_item_id = ?', [menuItemId]);
+    const variantsToSave = (itemForm.variants || []).filter((v) => (v.name || '').trim() && String(v.sale_price ?? '').trim() !== '');
+    for (let i = 0; i < variantsToSave.length; i++) {
+      const v = variantsToSave[i];
+      await dbRun(
+        'INSERT INTO item_variants (menu_item_id, name, sale_price, cost_price, sort_order) VALUES (?, ?, ?, ?, ?)',
+        [menuItemId, (v.name || '').trim(), Number(v.sale_price) || 0, Number(v.cost_price) || 0, i]
       );
     }
     await loadItems();
@@ -252,7 +298,11 @@ export default function Menu() {
                       <span className="font-medium text-slate-800">{item.name}</span>
                       {item.description && <span className="block text-xs text-slate-500 mt-0.5">{item.description}</span>}
                     </td>
-                    <td className="py-3 px-4 text-right font-medium text-slate-800">Rs. {Number(item.sale_price).toLocaleString()}</td>
+                    <td className="py-3 px-4 text-right font-medium text-slate-800">
+                      {(item.variants || []).length > 0
+                        ? `from Rs. ${Math.min(...(item.variants || []).map((v) => Number(v.sale_price) || 0)).toLocaleString()}`
+                        : `Rs. ${Number(item.sale_price).toLocaleString()}`}
+                    </td>
                     <td className="py-3 px-4 text-right text-slate-600">Rs. {Number(item.cost_price).toLocaleString()}</td>
                     <td className="py-3 px-4 text-center">
                       {isAdmin ? (
@@ -421,6 +471,47 @@ export default function Menu() {
                   className="rounded border-slate-300 text-primary-600 focus:ring-primary-500"
                 />
                 <label htmlFor="avail" className="text-sm text-slate-700">Available for sale</label>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Sizes / Variants (optional)</label>
+                <p className="text-xs text-slate-500 mb-2">For cold drinks use 0.5 L, 1 L, 1.5 L. For pizza use Small, Medium, Large. Each size can have its own price.</p>
+                {(itemForm.variants || []).map((v, idx) => (
+                  <div key={idx} className="flex gap-2 items-center mb-2">
+                    <input
+                      type="text"
+                      value={v.name}
+                      onChange={(e) => updateVariant(idx, 'name', e.target.value)}
+                      placeholder="e.g. 1 L or Large"
+                      className="flex-1 min-w-0 px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+                    />
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={v.sale_price}
+                      onChange={(e) => updateVariant(idx, 'sale_price', e.target.value)}
+                      placeholder="Price"
+                      className="w-24 px-2 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+                    />
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={v.cost_price}
+                      onChange={(e) => updateVariant(idx, 'cost_price', e.target.value)}
+                      placeholder="Cost"
+                      className="w-20 px-2 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+                    />
+                    <button type="button" onClick={() => removeVariant(idx)} className="p-1.5 rounded text-slate-500 hover:bg-red-100 hover:text-red-600">
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                ))}
+                <button type="button" onClick={addVariantRow} className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-slate-100 text-slate-700 text-sm font-medium hover:bg-slate-200">
+                  <Plus className="w-4 h-4" />
+                  Add size
+                </button>
+                {(itemForm.variants || []).length > 0 && (
+                  <p className="text-xs text-slate-500 mt-1">If sizes are set, customer will choose size when ordering. Base price above is used when no sizes are selected.</p>
+                )}
               </div>
             </div>
             <div className="flex gap-2 mt-6">

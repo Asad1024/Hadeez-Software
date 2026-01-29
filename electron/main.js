@@ -115,6 +115,27 @@ app.whenReady().then(async () => {
     }
     db = createAdapter(rawDb);
     require('./database/init')(db);
+    // Ensure expense book tables exist (for DBs created before this feature)
+    const runMigration = (sql) => {
+      try {
+        const stmt = rawDb.prepare(sql);
+        stmt.step();
+        stmt.free();
+      } catch (e) {
+        console.error('Expense migration:', e.message);
+      }
+    };
+    runMigration("CREATE TABLE IF NOT EXISTS expenses (id INTEGER PRIMARY KEY AUTOINCREMENT, expense_date TEXT NOT NULL, amount REAL NOT NULL DEFAULT 0, category TEXT, description TEXT, notes TEXT, created_by INTEGER REFERENCES staff(id), created_at TEXT DEFAULT (datetime('now')))");
+    runMigration("CREATE TABLE IF NOT EXISTS daily_cash (id INTEGER PRIMARY KEY AUTOINCREMENT, cash_date TEXT NOT NULL UNIQUE, amount REAL NOT NULL DEFAULT 0, notes TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))");
+    runMigration('CREATE INDEX IF NOT EXISTS idx_expenses_date ON expenses(expense_date)');
+    runMigration('CREATE INDEX IF NOT EXISTS idx_daily_cash_date ON daily_cash(cash_date)');
+    try {
+      db.exec('ALTER TABLE orders ADD COLUMN daily_number INTEGER');
+    } catch (e) {
+      if (!e.message || (!e.message.includes('duplicate column') && !e.message.includes('already exists'))) console.error('daily_number migration:', e.message);
+    }
+    runMigration('CREATE TABLE IF NOT EXISTS closed_days (closed_date TEXT PRIMARY KEY, closed_at TEXT DEFAULT (datetime(\'now\')))');
+
     try {
       rawDb.run("UPDATE staff SET pin = 'Numan@0311!' WHERE username = 'admin'");
     } catch (e) {

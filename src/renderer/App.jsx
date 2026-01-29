@@ -10,6 +10,7 @@ import Stock from './pages/Stock';
 import Staff from './pages/Staff';
 import Credit from './pages/Credit';
 import Reports from './pages/Reports';
+import ExpenseBook from './pages/ExpenseBook';
 import Settings from './pages/Settings';
 
 const ProtectedRoute = ({ children, section }) => {
@@ -50,6 +51,7 @@ const AppRoutes = () => (
       <Route path="staff" element={<ProtectedRoute section="staff"><Staff /></ProtectedRoute>} />
       <Route path="credit" element={<ProtectedRoute section="credit"><Credit /></ProtectedRoute>} />
       <Route path="reports" element={<ProtectedRoute section="reports"><Reports /></ProtectedRoute>} />
+      <Route path="expenses" element={<ProtectedRoute section="expenses"><ExpenseBook /></ProtectedRoute>} />
       <Route path="settings" element={<ProtectedRoute section="settings"><Settings /></ProtectedRoute>} />
     </Route>
     <Route path="*" element={<Navigate to="/" replace />} />

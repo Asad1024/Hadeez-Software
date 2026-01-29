@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { dbAll, dbRun, dbGet } from '../api/db';
 import { useAuth } from '../context/AuthContext';
-import { Plus, Minus, Trash2, Receipt, Search, X, Printer, Pencil, FileText } from 'lucide-react';
+import { Plus, Minus, Trash2, Receipt, Search, X, Printer, Pencil, FileText, Sun, Moon } from 'lucide-react';
 import clsx from 'clsx';
 
 const orderTypes = [
@@ -30,6 +30,13 @@ function generateOrderNumber() {
   const r = Math.floor(Math.random() * 100).toString().padStart(2, '0');
   return `ORD-${y}${m}${day}-${h}${min}${s}-${r}`;
 }
+
+const toLocalDateStr = (d) => {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+};
 
 export default function Orders() {
   const { user } = useAuth();
@@ -68,18 +75,38 @@ export default function Orders() {
   const [editAmountPaid, setEditAmountPaid] = useState('');
   const [editNotes, setEditNotes] = useState('');
   const [editAddItemSearch, setEditAddItemSearch] = useState('');
+  const [editVariantSelectItem, setEditVariantSelectItem] = useState(null);
+  const [todayClosed, setTodayClosed] = useState(false);
+  const [closeDayModal, setCloseDayModal] = useState(false);
+  const [daySummary, setDaySummary] = useState({ orders: 0, total: 0 });
+
+  const [itemVariants, setItemVariants] = useState([]);
+  const [variantSelectModal, setVariantSelectModal] = useState(null); // { item } when user must pick a size
+  const [taxEnabled, setTaxEnabled] = useState(false);
+  const [taxPercent, setTaxPercent] = useState(0);
+
+  const todayStr = toLocalDateStr(new Date());
 
   const loadData = useCallback(async () => {
-    const [catRes, itemRes, custRes, stockRes] = await Promise.all([
+    const today = toLocalDateStr(new Date());
+    const [catRes, itemRes, custRes, stockRes, variantsRes, settingsRes, closedRes] = await Promise.all([
       dbAll('SELECT * FROM menu_categories ORDER BY sort_order, name'),
       dbAll('SELECT * FROM menu_items WHERE is_available = 1 ORDER BY category_id, name'),
       dbAll('SELECT id, name, phone, current_balance, credit_limit FROM credit_customers ORDER BY name'),
       dbAll('SELECT id, name, current_quantity, min_quantity FROM stock_items'),
+      dbAll('SELECT * FROM item_variants ORDER BY menu_item_id, sort_order, name'),
+      dbAll('SELECT key, value FROM settings WHERE key IN (\'tax_enabled\', \'tax_percent\')'),
+      dbGet('SELECT 1 FROM closed_days WHERE closed_date = ?', [today]),
     ]);
     setCategories(catRes?.data ?? []);
     setItems(itemRes?.data ?? []);
     setCustomers(custRes?.data ?? []);
     setStockItems(stockRes?.data ?? []);
+    setItemVariants(variantsRes?.data ?? []);
+    const settingsRows = settingsRes?.data ?? [];
+    setTaxEnabled(settingsRows.find((r) => r.key === 'tax_enabled')?.value === '1');
+    setTaxPercent(Number(settingsRows.find((r) => r.key === 'tax_percent')?.value) || 0);
+    setTodayClosed(!!closedRes?.data);
     if (!selectedCategory && (catRes?.data?.length)) setSelectedCategory('general');
     setLoading(false);
   }, []);
@@ -137,26 +164,45 @@ export default function Orders() {
     return { stockId: stock.id, available, currentQuantity: Number(stock.current_quantity) || 0 };
   };
 
-  const addToCart = (item) => {
+  const getVariantsForItem = (menuItemId) => itemVariants.filter((v) => Number(v.menu_item_id) === Number(menuItemId));
+
+  const addToCart = (item, variant = null) => {
+    const variants = getVariantsForItem(item.id);
+    if (variants.length > 0 && !variant) {
+      setVariantSelectModal({ item });
+      return;
+    }
     const stockInfo = getStockAvailable(item.name);
     if (stockInfo && stockInfo.available <= 0) {
       alert(`${item.name}: No stock available (${stockInfo.currentQuantity} in stock).`);
       return;
     }
+    const displayName = variant ? `${item.name} (${variant.name})` : item.name;
+    const unitPrice = variant ? Number(variant.sale_price) : Number(item.sale_price);
     setCart((prev) => {
-      const existing = prev.find((c) => c.menu_item_id === item.id && !c.variant_id);
+      const match = variant
+        ? prev.find((c) => c.menu_item_id === item.id && c.variant_id === variant.id)
+        : prev.find((c) => c.menu_item_id === item.id && !c.variant_id);
       const nameLower = (item.name || '').trim().toLowerCase();
       const inCart = prev.filter((r) => (r.item_name || '').trim().toLowerCase() === nameLower).reduce((sum, r) => sum + r.quantity, 0);
       const stock = stockItems.find((s) => (s.name || '').trim().toLowerCase() === nameLower);
       const maxQty = stock ? Math.max(0, (Number(stock.current_quantity) || 0) - inCart) : null;
-      if (existing) {
-        const newQty = existing.quantity + 1;
+      if (match) {
+        const newQty = match.quantity + 1;
         if (maxQty != null && newQty > maxQty) return prev;
-        return prev.map((c) => (c === existing ? { ...c, quantity: newQty, total_price: newQty * c.unit_price } : c));
+        return prev.map((c) => (c === match ? { ...c, quantity: newQty, total_price: newQty * c.unit_price } : c));
       }
       if (maxQty != null && 1 > maxQty) return prev;
-      return [...prev, { menu_item_id: item.id, item_name: item.name, unit_price: Number(item.sale_price), quantity: 1, total_price: Number(item.sale_price), variant_id: null }];
+      return [...prev, {
+        menu_item_id: item.id,
+        item_name: displayName,
+        unit_price: unitPrice,
+        quantity: 1,
+        total_price: unitPrice,
+        variant_id: variant ? variant.id : null,
+      }];
     });
+    if (variant) setVariantSelectModal(null);
   };
 
   const updateQty = (index, delta) => {
@@ -183,11 +229,19 @@ export default function Orders() {
     const v = Number(discountValue) || 0;
     discountAmount = discountType === 'percent' ? (subtotal * v) / 100 : v;
   }
-  const total = Math.max(0, subtotal - discountAmount);
+  const afterDiscount = Math.max(0, subtotal - discountAmount);
+  const taxAmount = taxEnabled && taxPercent > 0 ? (afterDiscount * taxPercent) / 100 : 0;
+  const total = afterDiscount + taxAmount;
 
   const completeOrder = async () => {
     if (cart.length === 0) {
       alert('Add at least one item to the order.');
+      return;
+    }
+    const todayStr = toLocalDateStr(new Date());
+    const closedRes = await dbGet('SELECT 1 FROM closed_days WHERE closed_date = ?', [todayStr]);
+    if (closedRes?.data) {
+      alert('This day is closed. You cannot add new orders. Start a new day tomorrow.');
       return;
     }
     const stockRes = await dbAll('SELECT id, name, current_quantity FROM stock_items');
@@ -254,37 +308,44 @@ export default function Orders() {
     let customerCreditLimit = 0;
     let customerCurrentBalance = 0;
     let creditLimitExceeded = false;
-    if (creditBalanceToAdd > 0 && orderCustomerId) {
+    // Always fetch customer balance when a customer is selected (for "Previous Bill" on receipt)
+    if (orderCustomerId) {
       const custRow = (await dbGet('SELECT current_balance, credit_limit FROM credit_customers WHERE id = ?', [orderCustomerId])).data;
       if (custRow) {
         customerCurrentBalance = Number(custRow.current_balance) || 0;
         customerCreditLimit = Number(custRow.credit_limit) || 0;
-        const newBalance = customerCurrentBalance + creditBalanceToAdd;
-        if (customerCreditLimit > 0 && newBalance > customerCreditLimit) {
-          creditLimitExceeded = true;
-          const custName = customers.find((c) => c.id === Number(orderCustomerId))?.name || name;
-          const proceed = window.confirm(
-            `Credit limit will be exceeded.\n\nCustomer: ${custName}\nCredit limit: Rs. ${customerCreditLimit.toLocaleString()}\nCurrent balance: Rs. ${customerCurrentBalance.toLocaleString()}\nThis order adds: Rs. ${creditBalanceToAdd.toLocaleString()}\nNew balance: Rs. ${newBalance.toLocaleString()}\n\nProceed anyway? (Yes = save & print, No = cancel)`
-          );
-          if (!proceed) return;
+        if (creditBalanceToAdd > 0) {
+          const newBalance = customerCurrentBalance + creditBalanceToAdd;
+          if (customerCreditLimit > 0 && newBalance > customerCreditLimit) {
+            creditLimitExceeded = true;
+            const custName = customers.find((c) => c.id === Number(orderCustomerId))?.name || name;
+            const proceed = window.confirm(
+              `This customer has exceeded their credit limit.\n\nCustomer: ${custName}\nCredit limit: Rs. ${customerCreditLimit.toLocaleString()}\nCurrent balance: Rs. ${customerCurrentBalance.toLocaleString()}\nThis order adds: Rs. ${creditBalanceToAdd.toLocaleString()}\nNew balance: Rs. ${newBalance.toLocaleString()}\n\nDo you want to proceed with this billing? (OK = proceed, Cancel = go back)`
+            );
+            if (!proceed) return;
+          }
         }
       }
     }
 
     const orderNumber = generateOrderNumber();
+    const dailyNumRes = await dbGet('SELECT COALESCE(MAX(daily_number), 0) + 1 as next FROM orders WHERE date(created_at, \'localtime\') = ?', [todayStr]);
+    const dailyNumber = dailyNumRes?.data?.next ?? 1;
     const paymentMethodDb = paymentMethod === 'partial' ? 'mixed' : (paymentMethod === 'jazzcash' || paymentMethod === 'easypaisa' || paymentMethod === 'other_bank') ? 'card' : paymentMethod;
 
     const orderRes = await dbRun(
-      `INSERT INTO orders (order_number, order_type, table_number, customer_id, subtotal, discount_amount, discount_type, tax_amount, total, payment_method, payment_status, paid_amount, created_by, notes)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO orders (order_number, daily_number, order_type, table_number, customer_id, subtotal, discount_amount, discount_type, tax_amount, total, payment_method, payment_status, paid_amount, created_by, notes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         orderNumber,
+        dailyNumber,
         orderType,
         tableNumber || null,
         orderCustomerId || null,
         subtotal,
         discountAmount,
         discountValue ? discountType : null,
+        taxAmount,
         total,
         paymentMethodDb,
         paymentStatus,
@@ -345,8 +406,15 @@ export default function Orders() {
 
     const receiptCustomerName = orderCustomerId ? (customers.find((c) => c.id === Number(orderCustomerId))?.name ?? name) : name;
     const balanceAfterOrder = creditBalanceToAdd > 0 && orderCustomerId ? customerCurrentBalance + creditBalanceToAdd : null;
+    const previousBill = orderCustomerId ? customerCurrentBalance : null;
+    // Show "exceeded" on receipt when customer has a limit and (new balance or current balance) exceeds it
+    const effectiveBalance = balanceAfterOrder ?? (orderCustomerId ? customerCurrentBalance : 0);
+    const receiptCreditLimitExceeded = Boolean(
+      customerCreditLimit > 0 && effectiveBalance > customerCreditLimit
+    ) || creditLimitExceeded;
     setReceiptData({
       orderNumber,
+      dailyNumber,
       date: new Date().toISOString(),
       orderType,
       tableNumber: tableNumber || null,
@@ -354,14 +422,16 @@ export default function Orders() {
       items: [...cart],
       subtotal,
       discountAmount,
+      taxAmount,
       total,
       paymentMethod,
       notes: notes || null,
       settings,
       creditLimit: customerCreditLimit > 0 ? customerCreditLimit : null,
       balanceAfterOrder,
-      creditLimitExceeded: creditLimitExceeded || (customerCreditLimit > 0 && balanceAfterOrder != null && balanceAfterOrder > customerCreditLimit),
+      creditLimitExceeded: receiptCreditLimitExceeded,
       pendingAmount: creditBalanceToAdd > 0 ? creditBalanceToAdd : null,
+      previousBill,
     });
 
     setCart([]);
@@ -431,6 +501,7 @@ export default function Orders() {
       : null;
     setReceiptData({
       orderNumber: o.order_number,
+      dailyNumber: o.daily_number != null ? Number(o.daily_number) : null,
       date: o.created_at,
       orderType: o.order_type,
       tableNumber: o.table_number || null,
@@ -438,6 +509,7 @@ export default function Orders() {
       items: receiptItems,
       subtotal: Number(o.subtotal) || 0,
       discountAmount: Number(o.discount_amount) || 0,
+      taxAmount: Number(o.tax_amount) || 0,
       total: Number(o.total) || 0,
       paymentMethod: paymentMethodDisplay,
       notes: o.notes || null,
@@ -446,6 +518,7 @@ export default function Orders() {
       balanceAfterOrder,
       creditLimitExceeded,
       pendingAmount,
+      previousBill: null,
     });
   };
 
@@ -475,6 +548,7 @@ export default function Orders() {
     setEditAmountPaid(o.paid_amount != null ? String(o.paid_amount) : '');
     setEditNotes(o.notes || '');
     setEditAddItemSearch('');
+    setEditVariantSelectItem(null);
   };
 
   const editUpdateQty = (index, delta) => {
@@ -492,9 +566,18 @@ export default function Orders() {
     setEditOrderItems((prev) => prev.filter((_, i) => i !== index));
   };
 
-  const editAddItem = (item) => {
+  const editAddItem = (item, variant = null) => {
+    const variants = getVariantsForItem(item.id);
+    if (variants.length > 0 && !variant) {
+      setEditVariantSelectItem(item);
+      return;
+    }
+    const displayName = variant ? `${item.name} (${variant.name})` : item.name;
+    const unitPrice = variant ? Number(variant.sale_price) : Number(item.sale_price);
     setEditOrderItems((prev) => {
-      const existing = prev.find((c) => c.menu_item_id === item.id && !c.variant_id);
+      const existing = variant
+        ? prev.find((c) => c.menu_item_id === item.id && c.variant_id === variant.id)
+        : prev.find((c) => c.menu_item_id === item.id && !c.variant_id);
       if (existing) {
         return prev.map((c) =>
           c === existing
@@ -506,14 +589,33 @@ export default function Orders() {
         ...prev,
         {
           menu_item_id: item.id,
-          item_name: item.name,
-          unit_price: Number(item.sale_price),
+          item_name: displayName,
+          unit_price: unitPrice,
           quantity: 1,
-          total_price: Number(item.sale_price),
-          variant_id: null,
+          total_price: unitPrice,
+          variant_id: variant ? variant.id : null,
         },
       ];
     });
+    if (variant) setEditVariantSelectItem(null);
+  };
+
+  const openCloseDayModal = async () => {
+    const today = toLocalDateStr(new Date());
+    const res = await dbGet(
+      'SELECT COUNT(*) as orders, COALESCE(SUM(total), 0) as total FROM orders WHERE date(created_at, \'localtime\') = ?',
+      [today]
+    );
+    const d = res?.data ?? {};
+    setDaySummary({ orders: Number(d.orders) || 0, total: Number(d.total) || 0 });
+    setCloseDayModal(true);
+  };
+
+  const handleCloseDay = async () => {
+    const today = toLocalDateStr(new Date());
+    await dbRun('INSERT OR REPLACE INTO closed_days (closed_date, closed_at) VALUES (?, datetime("now"))', [today]);
+    setTodayClosed(true);
+    setCloseDayModal(false);
   };
 
   const saveEditedOrder = async () => {
@@ -635,17 +737,35 @@ export default function Orders() {
 
   return (
     <div className="p-6 h-full flex flex-col">
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
         <h1 className="text-xl font-semibold text-slate-800">Orders</h1>
-        <button
-          type="button"
-          onClick={() => setViewHistory(!viewHistory)}
-          className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-slate-100 text-slate-700 text-sm font-medium hover:bg-slate-200"
-        >
-          <Receipt className="w-4 h-4" />
-          {viewHistory ? 'New Order' : 'Order History'}
-        </button>
+        <div className="flex items-center gap-2">
+          {!viewHistory && !todayClosed && (
+            <button
+              type="button"
+              onClick={openCloseDayModal}
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-amber-100 text-amber-800 text-sm font-medium hover:bg-amber-200"
+            >
+              <Moon className="w-4 h-4" />
+              Close day
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => setViewHistory(!viewHistory)}
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-slate-100 text-slate-700 text-sm font-medium hover:bg-slate-200"
+          >
+            <Receipt className="w-4 h-4" />
+            {viewHistory ? 'New Order' : 'Order History'}
+          </button>
+        </div>
       </div>
+      {!viewHistory && todayClosed && (
+        <div className="mb-4 p-4 rounded-xl bg-slate-100 border border-slate-200 text-slate-700 text-sm flex items-center gap-2">
+          <Sun className="w-5 h-5 text-amber-600 shrink-0" />
+          <span><strong>Day closed.</strong> New orders cannot be added. Tomorrow will start as a new day (Order #1, 2, 3...).</span>
+        </div>
+      )}
 
       {viewHistory ? (
         <div className="flex-1 bg-white rounded-xl border border-slate-200 p-4">
@@ -661,7 +781,7 @@ export default function Orders() {
             <table className="w-full">
               <thead>
                 <tr className="border-b border-slate-200 text-left text-sm font-semibold text-slate-600">
-                  <th className="py-2 px-3">Order #</th>
+                  <th className="py-2 px-3">No.</th>
                   <th className="py-2 px-3">Type</th>
                   <th className="py-2 px-3">Total</th>
                   <th className="py-2 px-3">Payment</th>
@@ -673,7 +793,11 @@ export default function Orders() {
               <tbody>
                 {orderHistory.map((o) => (
                   <tr key={o.id} className="border-b border-slate-100">
-                    <td className="py-2 px-3 font-medium">{o.order_number}</td>
+                    <td className="py-2 px-3">
+                      <span className="text-lg font-extrabold text-slate-900">
+                        {o.daily_number != null ? o.daily_number : o.order_number}
+                      </span>
+                    </td>
                     <td className="py-2 px-3 capitalize">{o.order_type?.replace('_', ' ')}</td>
                     <td className="py-2 px-3">Rs. {Number(o.total).toLocaleString()}</td>
                     <td className="py-2 px-3 capitalize">{o.payment_method}</td>
@@ -765,6 +889,11 @@ export default function Orders() {
                   const stockInfo = getStockAvailable(item.name);
                   const minQty = Number(stock?.min_quantity) ?? 0;
                   const isLow = stockInfo && minQty > 0 && stockInfo.available <= minQty;
+                  const variants = getVariantsForItem(item.id);
+                  const hasSizes = variants.length > 0;
+                  const displayPrice = hasSizes
+                    ? `from Rs. ${Math.min(...variants.map((v) => Number(v.sale_price) || 0)).toLocaleString()}`
+                    : `Rs. ${Number(item.sale_price).toLocaleString()}`;
                   return (
                     <button
                       key={item.id}
@@ -776,7 +905,8 @@ export default function Orders() {
                       )}
                     >
                       <p className="font-medium text-slate-800 truncate">{item.name}</p>
-                      <p className="text-sm text-primary-600 font-medium mt-0.5">Rs. {Number(item.sale_price).toLocaleString()}</p>
+                      <p className="text-sm text-primary-600 font-medium mt-0.5">{displayPrice}</p>
+                      {hasSizes && <p className="text-xs text-slate-500 mt-0.5">Choose size</p>}
                       {stockInfo != null && (
                         <p className={clsx('text-xs mt-1', isLow ? 'text-amber-700 font-medium' : 'text-slate-500')}>
                           {stockInfo.available <= 0 ? 'Out of stock' : `${stockInfo.available} left`}
@@ -925,6 +1055,12 @@ export default function Orders() {
                   step={discountType === 'percent' ? '1' : '0.01'}
                 />
               </div>
+              {taxAmount > 0 && (
+                <div className="flex justify-between text-sm text-slate-600">
+                  <span>Tax ({taxPercent}%)</span>
+                  <span className="font-medium">Rs. {taxAmount.toLocaleString()}</span>
+                </div>
+              )}
               <div className="flex justify-between font-semibold text-slate-800">
                 <span>Total</span>
                 <span>Rs. {total.toLocaleString()}</span>
@@ -975,12 +1111,78 @@ export default function Orders() {
               <button
                 type="button"
                 onClick={completeOrder}
-                disabled={cart.length === 0}
+                disabled={cart.length === 0 || todayClosed}
                 className="w-full py-3 rounded-lg bg-primary-600 text-white font-semibold hover:bg-primary-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
-                Complete Order — Rs. {total.toLocaleString()}
+                {todayClosed ? 'Day closed' : `Complete Order — Rs. ${total.toLocaleString()}`}
               </button>
             </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Size / Variant Select Modal */}
+      {variantSelectModal && (() => {
+        const { item } = variantSelectModal;
+        const variants = getVariantsForItem(item.id);
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+            <div className="bg-white rounded-xl shadow-xl w-full max-w-sm p-6">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-lg font-semibold text-slate-800">Select size</h2>
+                <button type="button" onClick={() => setVariantSelectModal(null)} className="p-1 rounded hover:bg-slate-100">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              <p className="text-sm text-slate-600 mb-3">{item.name}</p>
+              <div className="space-y-2">
+                {variants.map((v) => (
+                  <button
+                    key={v.id}
+                    type="button"
+                    onClick={() => addToCart(item, v)}
+                    className="w-full flex items-center justify-between px-4 py-3 rounded-lg border border-slate-200 hover:border-primary-300 hover:bg-primary-50/50 text-left transition-colors"
+                  >
+                    <span className="font-medium text-slate-800">{v.name}</span>
+                    <span className="text-primary-600 font-medium">Rs. {Number(v.sale_price).toLocaleString()}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Close day modal */}
+      {closeDayModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-sm p-6">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-lg font-semibold text-slate-800">Close day</h2>
+              <button type="button" onClick={() => setCloseDayModal(false)} className="p-1 rounded hover:bg-slate-100">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <p className="text-sm text-slate-600 mb-4">Today ({todayStr}) summary:</p>
+            <div className="space-y-2 mb-4">
+              <div className="flex justify-between text-sm">
+                <span className="text-slate-600">Orders today</span>
+                <span className="font-semibold text-slate-800">{daySummary.orders}</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-slate-600">Total sales</span>
+                <span className="font-semibold text-slate-800">Rs. {daySummary.total.toLocaleString()}</span>
+              </div>
+            </div>
+            <p className="text-xs text-slate-500 mb-4">After closing, you cannot add new orders until tomorrow. Tomorrow will start as a new day (Order #1, 2, 3...).</p>
+            <div className="flex gap-2">
+              <button type="button" onClick={() => setCloseDayModal(false)} className="flex-1 px-4 py-2 rounded-lg bg-slate-100 text-slate-700 text-sm font-medium hover:bg-slate-200">
+                Cancel
+              </button>
+              <button type="button" onClick={handleCloseDay} className="flex-1 px-4 py-2 rounded-lg bg-amber-600 text-amber-50 text-sm font-medium hover:bg-amber-500">
+                Close day
+              </button>
             </div>
           </div>
         </div>
@@ -1049,13 +1251,16 @@ export default function Orders() {
             <div className="bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[90vh] flex flex-col">
               <div className="p-4 border-b border-slate-200 flex items-center justify-between shrink-0">
                 <h2 className="text-lg font-semibold text-slate-800">Edit order</h2>
-                <button type="button" onClick={() => { setEditOrderModal(null); setEditOrderItems([]); }} className="p-1 rounded hover:bg-slate-100">
+                <button type="button" onClick={() => { setEditOrderModal(null); setEditOrderItems([]); setEditVariantSelectItem(null); }} className="p-1 rounded hover:bg-slate-100">
                   <X className="w-5 h-5" />
                 </button>
               </div>
               <div className="flex-1 overflow-y-auto p-4 space-y-3">
                 <p className="text-sm text-slate-600">
-                  <span className="font-medium">Order #</span> {editOrderModal.order_number} · {new Date(editOrderModal.created_at).toLocaleString()}
+                  <span className="text-xl font-extrabold text-slate-900">
+                    {editOrderModal.daily_number != null ? editOrderModal.daily_number : editOrderModal.order_number}
+                  </span>
+                  {' · '}{new Date(editOrderModal.created_at).toLocaleString()}
                 </p>
                 <div className="flex gap-2 flex-wrap">
                   {orderTypes.map((t) => (
@@ -1122,17 +1327,46 @@ export default function Orders() {
                       className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-sm mb-1"
                     />
                     <div className="flex flex-wrap gap-1 max-h-24 overflow-y-auto">
-                      {editMenuItems.slice(0, 12).map((item) => (
-                        <button
-                          key={item.id}
-                          type="button"
-                          onClick={() => editAddItem(item)}
-                          className="px-2 py-1 rounded bg-slate-100 text-slate-700 text-xs font-medium hover:bg-slate-200"
-                        >
-                          {item.name} — Rs.{Number(item.sale_price).toLocaleString()}
-                        </button>
-                      ))}
+                      {editMenuItems.slice(0, 12).map((item) => {
+                        const vars = getVariantsForItem(item.id);
+                        const hasSizes = vars.length > 0;
+                        const label = hasSizes ? `${item.name} (choose size)` : `${item.name} — Rs.${Number(item.sale_price).toLocaleString()}`;
+                        return (
+                          <button
+                            key={item.id}
+                            type="button"
+                            onClick={() => editAddItem(item)}
+                            className="px-2 py-1 rounded bg-slate-100 text-slate-700 text-xs font-medium hover:bg-slate-200"
+                          >
+                            {label}
+                          </button>
+                        );
+                      })}
                     </div>
+                    {editVariantSelectItem && (
+                      <div className="mt-2 p-2 border border-primary-200 rounded-lg bg-primary-50/50">
+                        <p className="text-xs font-medium text-slate-700 mb-1">Select size: {editVariantSelectItem.name}</p>
+                        <div className="flex flex-wrap gap-1">
+                          {getVariantsForItem(editVariantSelectItem.id).map((v) => (
+                            <button
+                              key={v.id}
+                              type="button"
+                              onClick={() => editAddItem(editVariantSelectItem, v)}
+                              className="px-2 py-1 rounded bg-white border border-slate-200 text-slate-700 text-xs font-medium hover:bg-primary-100 hover:border-primary-300"
+                            >
+                              {v.name} — Rs.{Number(v.sale_price).toLocaleString()}
+                            </button>
+                          ))}
+                          <button
+                            type="button"
+                            onClick={() => setEditVariantSelectItem(null)}
+                            className="px-2 py-1 rounded bg-slate-200 text-slate-600 text-xs font-medium hover:bg-slate-300"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
                 <div className="flex gap-2 items-center">
@@ -1200,7 +1434,7 @@ export default function Orders() {
               <div className="p-4 border-t border-slate-200 flex gap-2 shrink-0">
                 <button
                   type="button"
-                  onClick={() => { setEditOrderModal(null); setEditOrderItems([]); }}
+                  onClick={() => { setEditOrderModal(null); setEditOrderItems([]); setEditVariantSelectItem(null); }}
                   className="px-4 py-2 rounded-lg bg-slate-100 text-slate-700 text-sm font-medium hover:bg-slate-200"
                 >
                   Cancel
@@ -1248,16 +1482,17 @@ export default function Orders() {
                 <h2 className="text-lg font-bold border-b border-slate-300 pb-2 mb-2">
                   {receiptData.settings?.restaurant_name || 'Hadeez Restaurant'}
                 </h2>
-                {receiptData.settings?.restaurant_address && (
-                  <p className="text-xs text-slate-600 mb-1">{receiptData.settings.restaurant_address}</p>
-                )}
                 {receiptData.settings?.restaurant_phone && (
                   <p className="text-xs text-slate-600 mb-3">{receiptData.settings.restaurant_phone}</p>
                 )}
                 {receiptData.settings?.receipt_header && (
                   <p className="text-xs text-slate-500 mb-3">{receiptData.settings.receipt_header}</p>
                 )}
-                <p className="text-sm font-semibold mt-3">Order # {receiptData.orderNumber}</p>
+                <p className="mt-3">
+                  <span className="text-3xl font-extrabold text-slate-900 tracking-tight">
+                    {receiptData.dailyNumber != null ? receiptData.dailyNumber : receiptData.orderNumber}
+                  </span>
+                </p>
                 <p className="text-xs text-slate-600">
                   {new Date(receiptData.date).toLocaleString()} · {receiptData.orderType?.replace('_', ' ')}
                   {receiptData.tableNumber && ` · Table ${receiptData.tableNumber}`}
@@ -1286,6 +1521,18 @@ export default function Orders() {
                       <span>- {(receiptData.settings?.currency || 'Rs.')} {receiptData.discountAmount.toLocaleString()}</span>
                     </div>
                   )}
+                  {(receiptData.taxAmount != null && receiptData.taxAmount > 0) && (
+                    <div className="flex justify-between text-slate-600">
+                      <span>Tax</span>
+                      <span>{(receiptData.settings?.currency || 'Rs.')} {Number(receiptData.taxAmount).toLocaleString()}</span>
+                    </div>
+                  )}
+                  {receiptData.previousBill != null && (
+                    <div className="flex justify-between text-slate-600 mt-1">
+                      <span>Previous Bill</span>
+                      <span>{(receiptData.settings?.currency || 'Rs.')} {Number(receiptData.previousBill).toLocaleString()}</span>
+                    </div>
+                  )}
                   <div className="flex justify-between font-bold text-base mt-2 pt-2 border-t border-slate-300">
                     <span>Total</span>
                     <span>{(receiptData.settings?.currency || 'Rs.')} {receiptData.total.toLocaleString()}</span>
@@ -1301,9 +1548,13 @@ export default function Orders() {
                     {receiptData.balanceAfterOrder != null && (
                       <p className="text-slate-600">Balance after this order: {(receiptData.settings?.currency || 'Rs.')} {Number(receiptData.balanceAfterOrder).toLocaleString()}</p>
                     )}
-                    {receiptData.creditLimitExceeded && (
-                      <p className="font-medium text-amber-700">Credit limit exceeded</p>
-                    )}
+                  </div>
+                )}
+                {receiptData.creditLimitExceeded && (
+                  <div className="text-left mt-3 pt-3 border-t-2 border-amber-400 p-3" style={{ background: '#fef3c7' }}>
+                    <p className="text-sm font-semibold text-amber-900">
+                      Dear Customer, you have exceeded your credit limit. Please clear your dues First.
+                    </p>
                   </div>
                 )}
                 {receiptData.notes && (
@@ -1311,6 +1562,9 @@ export default function Orders() {
                 )}
                 {receiptData.settings?.receipt_footer && (
                   <p className="text-xs text-slate-500 mt-4 pt-3 border-t border-slate-200">{receiptData.settings.receipt_footer}</p>
+                )}
+                {receiptData.settings?.restaurant_address && (
+                  <p className="text-xs text-slate-600 mt-4 pt-3 border-t border-slate-200 text-left">{receiptData.settings.restaurant_address}</p>
                 )}
               </div>
             </div>

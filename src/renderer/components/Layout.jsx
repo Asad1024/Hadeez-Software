@@ -7,6 +7,7 @@ import {
   Package,
   Users,
   CreditCard,
+  BookOpen,
   BarChart3,
   Settings,
   LogOut,
@@ -21,6 +22,7 @@ const navItems = [
   { to: '/stock', icon: Package, label: 'Stock', section: 'stock' },
   { to: '/staff', icon: Users, label: 'Staff', section: 'staff' },
   { to: '/credit', icon: CreditCard, label: 'Credit', section: 'credit' },
+  { to: '/expenses', icon: BookOpen, label: 'Expense Book', section: 'expenses' },
   { to: '/reports', icon: BarChart3, label: 'Reports', section: 'reports' },
   { to: '/settings', icon: Settings, label: 'Settings', section: 'settings' },
 ];
